@@ -1,4 +1,3 @@
-c ======================================================================
 c     Programa MEF - Metodo dos Elementos Finitos
 c     Elasticidade Plana 2D (Estado Plano de Tensoes e Deformacoes)
 c
@@ -165,10 +164,21 @@ c
       call pcg(a(i8),a(i6),m(i7),a(i15),a(i16),a(i17),a(i18),
      .         a(i19),neq)
 c
-c     Impressao dos resultados:
+c     Impressao dos resultados (formato texto):
 c
       call wdata(m(i2),m(i3),a(i4),a(i5),a(i6),nnode,numel,ndm,nen,
      .           ndf,nout)
+c
+c     Impressao dos resultados (formato VTK para ParaView):
+c
+      nvtk = 3
+      print*, 'Arquivo VTK de saida (ex: resultado.vtk):'
+      read(*,'(a)') fname
+      open(nvtk,file=fname,status='replace',action='write')
+      call wvtk(m(i2),m(i3),a(i4),a(i5),a(i6),nnode,numel,ndm,nen,
+     .          ndf,nvtk)
+      close(nvtk)
+      print*, 'Arquivo VTK gerado com sucesso.'
       print*, 'Calculo concluido. Resultados gravados com sucesso.'
       return
       end
@@ -1229,5 +1239,73 @@ c
           y(i)   = y(i)   + a(j-l)*x(i-l)
   100   continue
   200 continue
+      return
+      end
+
+c ======================================================================
+      subroutine wvtk(ix,id,x,f,u,nnode,numel,ndm,nen,ndf,nvtk)
+c     Escrita dos resultados em formato VTK para visualizacao no ParaView.
+c
+c     Formato: VTK Unstructured Grid ASCII
+c       - Coordenadas nodais (com z=0 para 2D)
+c       - Conectividade dos elementos
+c       - Dados nodais: deslocamentos (u_x, u_y, u_z)
+c ======================================================================
+      integer nnode,numel,ndm,nen,ndf,ix(nen+1,*),id(ndf,*),nvtk
+      real*8  x(ndm,*),f(ndf,*),u(*),aux(3)
+      integer i,j,k
+c
+c     Cabecalho VTK:
+c
+      write(nvtk,'(a)') '# vtk DataFile Version 2.0'
+      write(nvtk,'(a)') 'MEF - Elasticidade Plana 2D'
+      write(nvtk,'(a)') 'ASCII'
+      write(nvtk,'(a)') 'DATASET UNSTRUCTURED_GRID'
+c
+c     Bloco de coordenadas nodais:
+c
+      write(nvtk,'(a,i8,a)') 'POINTS ', nnode, ' float'
+      do 100 i = 1, nnode
+        write(nvtk,'(3e16.8)') x(1,i), x(2,i), 0.0d0
+  100 continue
+c
+c     Bloco de conectividade dos elementos:
+c     Total de valores = numel*(nen+1)  [numero de nos + tipo]
+c     Tipo VTK: 5 para triangulos (T3), 9 para quadrilateros (Q4)
+c
+      write(nvtk,'(a,2i8)') 'CELLS ', numel, numel*(nen+1)
+      do 200 i = 1, numel
+        write(nvtk,'(10i8)') nen, (ix(j,i)-1, j=1,nen)
+  200 continue
+c
+c     Tipos de celulas VTK:
+c     5 = VTK_TRIANGLE (T3)
+c     9 = VTK_QUAD (Q4)
+c
+      write(nvtk,'(a,i8)') 'CELL_TYPES ', numel
+      if (nen .eq. 3) then
+        do 300 i = 1, numel
+          write(nvtk,'(i2)') 5
+  300   continue
+      else if (nen .eq. 4) then
+        do 350 i = 1, numel
+          write(nvtk,'(i2)') 9
+  350   continue
+      endif
+c
+c     Dados nodais: deslocamentos (u_x, u_y, u_z com z=0)
+c
+      write(nvtk,'(a,i8)') 'POINT_DATA ', nnode
+      write(nvtk,'(a)') 'VECTORS Deslocamentos float'
+      do 400 i = 1, nnode
+        aux(1) = f(1,i)
+        aux(2) = f(2,i)
+        aux(3) = 0.0d0
+        k = id(1,i)
+        if (k .gt. 0) aux(1) = u(k)
+        k = id(2,i)
+        if (k .gt. 0) aux(2) = u(k)
+        write(nvtk,'(3e16.8)') aux(1), aux(2), aux(3)
+  400 continue
       return
       end
