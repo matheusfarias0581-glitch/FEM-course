@@ -1245,15 +1245,17 @@ c
 
 c ======================================================================
       subroutine wvtk(e,ie,ix,id,x,f,u,nnode,numel,ndm,nen,ndf,nvtk)
-c     Escrita dos resultados em VTK com TENSOES SEPARADAS (Q4)
+c     Escrita dos resultados em VTK com TENSOES NOS NÓS (Gradiente Suave)
 c ======================================================================
       integer nnode,numel,ndm,nen,ndf,nvtk
       integer ie(*),ix(nen+1,*),id(ndf,*)
       real*8  e(10,*),x(ndm,*),f(ndf,*),u(*),aux(3)
       integer i,j,k1,k2,nel,no,ma,iel
-      real*8  xl(2,4), ul_1d(8)
-      real*8  sigx, sigy, tauxy
-      real*8  vet_sigx(numel), vet_sigy(numel), vet_tauxy(numel)
+      real*8  xl(2,4), ul_1d(8), sig_no(3,4)
+      
+c     Vetores para acumular as tensoes nos nos (Projecao Nodal)
+      real*8  s_nx(nnode), s_ny(nnode), s_nxy(nnode)
+      integer c_no(nnode)
 
       write(nvtk,'(a)') '# vtk DataFile Version 2.0'
       write(nvtk,'(a)') 'MEF - Elasticidade Plana 2D'
@@ -1281,7 +1283,10 @@ c ======================================================================
   350   continue
       endif
 
+c     TODOS OS DADOS A PARTIR DAQUI SÃO POINT_DATA (Nos)
       write(nvtk,'(a,i8)') 'POINT_DATA ', nnode
+      
+c     1. Imprimir Deslocamentos
       write(nvtk,'(a)') 'VECTORS Deslocamentos float'
       do 400 i = 1, nnode
         aux(1) = f(1,i)
@@ -1294,13 +1299,21 @@ c ======================================================================
         write(nvtk,'(3e16.8)') aux(1), aux(2), aux(3)
   400 continue
 
-c     --- INICIO TEMA 2: TENSOES NOS ELEMENTOS Q4 ---
+c     --- INICIO TEMA 2: TENSOES NOS NÓS (SUAVIZADAS) ---
       if (nen .eq. 4) then
+c       Zerar vetores acumuladores
+        do 450 i = 1, nnode
+          s_nx(i)  = 0.d0
+          s_ny(i)  = 0.d0
+          s_nxy(i) = 0.d0
+          c_no(i)  = 0
+  450   continue
+
         do 600 nel = 1, numel
           ma  = ix(nen+1,nel)
           iel = ie(ma)
           
-c         Mapeando deslocamentos e coordenadas pro vetor 1D
+c         Mapeando deslocamentos pro vetor 1D
           do 500 i = 1, nen
             no = ix(i,nel)
             xl(1,i) = x(1,no)
@@ -1321,34 +1334,46 @@ c         Mapeando deslocamentos e coordenadas pro vetor 1D
             endif
   500     continue
 
-c         Calcula a tensao e guarda nos vetores
+c         A subrotina agora devolve a tensao projetada nos 4 NÓS do elemento
           call calc_stress_q4(e(1,ma),xl,ul_1d,nel,ndm,nen*ndf,
-     .                        sigx,sigy,tauxy,iel)
+     .                        sig_no,iel)
           
-          vet_sigx(nel)  = sigx
-          vet_sigy(nel)  = sigy
-          vet_tauxy(nel) = tauxy
+c         Acumular a tensao no no global correspondente
+          do 550 i = 1, nen
+            no = ix(i,nel)
+            s_nx(no)  = s_nx(no)  + sig_no(1,i)
+            s_ny(no)  = s_ny(no)  + sig_no(2,i)
+            s_nxy(no) = s_nxy(no) + sig_no(3,i)
+            c_no(no)  = c_no(no)  + 1
+  550     continue
   600   continue
 
-c       Escrevendo no formato VTK em variaveis separadas
-        write(nvtk,'(a,i8)') 'CELL_DATA ', numel
-        
+c       Tirar a media final nos nos (onde elementos se encontram)
+        do 650 i = 1, nnode
+          if (c_no(i) .gt. 0) then
+            s_nx(i)  = s_nx(i)  / dble(c_no(i))
+            s_ny(i)  = s_ny(i)  / dble(c_no(i))
+            s_nxy(i) = s_nxy(i) / dble(c_no(i))
+          endif
+  650   continue
+
+c       Escrevendo no formato VTK como SCALARS associados aos POINT_DATA
         write(nvtk,'(a)') 'SCALARS Tensao_X float 1'
         write(nvtk,'(a)') 'LOOKUP_TABLE default'
-        do 700 i = 1, numel
-          write(nvtk,'(e16.8)') vet_sigx(i)
+        do 700 i = 1, nnode
+          write(nvtk,'(e16.8)') s_nx(i)
   700   continue
 
         write(nvtk,'(a)') 'SCALARS Tensao_Y float 1'
         write(nvtk,'(a)') 'LOOKUP_TABLE default'
-        do 710 i = 1, numel
-          write(nvtk,'(e16.8)') vet_sigy(i)
+        do 710 i = 1, nnode
+          write(nvtk,'(e16.8)') s_ny(i)
   710   continue
 
         write(nvtk,'(a)') 'SCALARS Tensao_XY float 1'
         write(nvtk,'(a)') 'LOOKUP_TABLE default'
-        do 720 i = 1, numel
-          write(nvtk,'(e16.8)') vet_tauxy(i)
+        do 720 i = 1, nnode
+          write(nvtk,'(e16.8)') s_nxy(i)
   720   continue
       endif
 
@@ -1356,24 +1381,23 @@ c       Escrevendo no formato VTK em variaveis separadas
       end
 
 c ======================================================================
-      subroutine calc_stress_q4(e,x,u,nel,ndm,nst,sigx,sigy,tauxy,iel)
-c     Subrotina: Calculo de Tensoes nos elementos Q4 (EPD e EPT)
+      subroutine calc_stress_q4(e,x,u,nel,ndm,nst,sig_no,iel)
+c     Subrotina: Calculo de Tensoes e Projecao para os Nos (EPD e EPT)
 c ======================================================================
       implicit none
-      integer nel, ndm, nst, iel, i, j, k, m, n
+      integer nel, ndm, nst, iel, i, j, k, m, n, gp
       real*8  e(*), x(ndm,*), u(nst)
-      real*8  sigx, sigy, tauxy
+      real*8  sig_no(3,4), sg_gp(3,4)
       real*8  xj(ndm,2), xji(ndm,2), hr(4), hs(4), hx(4), hy(4)
       real*8  rr, ss, det
       real*8  my, nu, a, b_var, c_var, d11, d12, d21, d22, d33
-      real*8  bmat(3,8), dmat(3,3), db(3,8), sig(3), sig_avg(3)
+      real*8  bmat(3,8), dmat(3,3), db(3,8), sig(3)
 
       my = e(1)
       nu = e(2)
 
-c     Define a Matriz Constitutiva dependendo do tipo do elemento
+c     Matriz Constitutiva (EPD ou EPT)
       if (iel .eq. 3) then
-c       --> Estado Plano de Deformacoes (EPD) <--
         a     = 1.d0 + nu
         b_var = a * (1.d0 - 2.d0*nu)
         c_var = my * (1.d0 - nu) / b_var
@@ -1383,7 +1407,6 @@ c       --> Estado Plano de Deformacoes (EPD) <--
         d22   = c_var
         d33   = my / (2.d0 * a)
       else
-c       --> Estado Plano de Tensoes (EPT) <--
         a    = my / (1.d0 - nu*nu)
         d11  = a
         d12  = a * nu
@@ -1392,23 +1415,15 @@ c       --> Estado Plano de Tensoes (EPT) <--
         d33  = my / (2.d0 * (1.d0 + nu))
       endif
       
-      dmat(1,1) = d11
-      dmat(1,2) = d12
-      dmat(1,3) = 0.d0
-      dmat(2,1) = d21
-      dmat(2,2) = d22
-      dmat(2,3) = 0.d0
-      dmat(3,1) = 0.d0
-      dmat(3,2) = 0.d0
-      dmat(3,3) = d33
-
-      sig_avg(1) = 0.d0
-      sig_avg(2) = 0.d0
-      sig_avg(3) = 0.d0
+      dmat(1,1) = d11; dmat(1,2) = d12; dmat(1,3) = 0.d0
+      dmat(2,1) = d21; dmat(2,2) = d22; dmat(2,3) = 0.d0
+      dmat(3,1) = 0.d0; dmat(3,2) = 0.d0; dmat(3,3) = d33
 
 c     Loop nos 4 pontos de Gauss (2x2):
+      gp = 0
       do 600 i = 1, 2
       do 600 j = 1, 2
+        gp = gp + 1
         if (i .eq. 1 .and. j .eq. 1) then
           rr =  0.577350269189626d0
           ss = -0.577350269189626d0
@@ -1423,48 +1438,34 @@ c     Loop nos 4 pontos de Gauss (2x2):
           ss = -0.577350269189626d0
         endif
 
-c       Derivadas das funcoes de interpolacao
-        hr(1) =   (1.d0+ss) / 4.d0
-        hr(2) = - (1.d0+ss) / 4.d0
-        hr(3) = - (1.d0-ss) / 4.d0
-        hr(4) =   (1.d0-ss) / 4.d0
-        hs(1) =   (1.d0+rr) / 4.d0
-        hs(2) =   (1.d0-rr) / 4.d0
-        hs(3) = - (1.d0-rr) / 4.d0
-        hs(4) = - (1.d0+rr) / 4.d0
+c       Derivadas e Jacobiana
+        hr(1) =   (1.d0+ss)/4.d0; hr(2) = - (1.d0+ss)/4.d0
+        hr(3) = - (1.d0-ss)/4.d0; hr(4) =   (1.d0-ss)/4.d0
+        hs(1) =   (1.d0+rr)/4.d0; hs(2) =   (1.d0-rr)/4.d0
+        hs(3) = - (1.d0-rr)/4.d0; hs(4) = - (1.d0+rr)/4.d0
 
-c       Matriz Jacobiana
         xj(1,1) = hr(1)*x(1,1)+hr(2)*x(1,2)+hr(3)*x(1,3)+hr(4)*x(1,4)
         xj(2,1) = hs(1)*x(1,1)+hs(2)*x(1,2)+hs(3)*x(1,3)+hs(4)*x(1,4)
         xj(1,2) = hr(1)*x(2,1)+hr(2)*x(2,2)+hr(3)*x(2,3)+hr(4)*x(2,4)
         xj(2,2) = hs(1)*x(2,1)+hs(2)*x(2,2)+hs(3)*x(2,3)+hs(4)*x(2,4)
-        
         det = xj(1,1)*xj(2,2)-xj(2,1)*xj(1,2)
 
-c       Inversa da Jacobiana
-        xji(1,1) =  xj(2,2) / det
-        xji(1,2) = -xj(1,2) / det
-        xji(2,1) = -xj(2,1) / det
-        xji(2,2) =  xj(1,1) / det
+        xji(1,1) =  xj(2,2)/det; xji(1,2) = -xj(1,2)/det
+        xji(2,1) = -xj(2,1)/det; xji(2,2) =  xj(1,1)/det
 
-c       Derivadas cartesianas
         do 300 k = 1, 4
           hx(k) = xji(1,1)*hr(k) + xji(1,2)*hs(k)
           hy(k) = xji(2,1)*hr(k) + xji(2,2)*hs(k)
   300   continue
 
-c       Montando a matriz B (3 linhas x 8 colunas)
         do 400 k = 1, 4
           n = (k-1)*2 + 1
-          bmat(1,n)   = hx(k)
-          bmat(1,n+1) = 0.d0
-          bmat(2,n)   = 0.d0
-          bmat(2,n+1) = hy(k)
-          bmat(3,n)   = hy(k)
-          bmat(3,n+1) = hx(k)
+          bmat(1,n) = hx(k); bmat(1,n+1) = 0.d0
+          bmat(2,n) = 0.d0;  bmat(2,n+1) = hy(k)
+          bmat(3,n) = hy(k); bmat(3,n+1) = hx(k)
   400   continue
 
-c       Calculando a tensao (sig = D * B * u)
+c       Calculando a tensao EXATA no ponto de Gauss (sig = D * B * u)
         do 500 m = 1, 3
           sig(m) = 0.d0
           do 450 n = 1, 8
@@ -1474,15 +1475,23 @@ c       Calculando a tensao (sig = D * B * u)
   420       continue
             sig(m) = sig(m) + db(m,n) * u(n)
   450     continue
-          sig_avg(m) = sig_avg(m) + sig(m)
+c         Salvando o resultado daquele ponto de Gauss especifico
+          sg_gp(m, gp) = sig(m)
   500   continue
-
   600 continue
 
-c     Tirando a media das tensoes dos 4 pontos
-      sigx  = sig_avg(1) / 4.d0
-      sigy  = sig_avg(2) / 4.d0
-      tauxy = sig_avg(3) / 4.d0
+c     Atribuindo as tensoes dos Pontos de Gauss para os Nos correspondentes:
+c     No 1 (-1,-1) mais proximo do GP 4 (rr<0, ss<0)
+c     No 2 (+1,-1) mais proximo do GP 1 (rr>0, ss<0)
+c     No 3 (+1,+1) mais proximo do GP 2 (rr>0, ss>0)
+c     No 4 (-1,+1) mais proximo do GP 3 (rr<0, ss>0)
+
+      do 700 m = 1, 3
+        sig_no(m,1) = sg_gp(m,4)
+        sig_no(m,2) = sg_gp(m,1)
+        sig_no(m,3) = sg_gp(m,2)
+        sig_no(m,4) = sg_gp(m,3)
+  700 continue
 
       return
       end
